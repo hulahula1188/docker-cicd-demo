@@ -1,0 +1,67 @@
+name: CI/CD
+
+# 触发条件：推送到 main 或开 PR 时自动跑
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: 1. 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 2. 装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # ---------- CI 部分：构建 + 测试 ----------
+      - name: 3. 跑单元测试
+        run: python -m unittest -v test_app
+
+      - name: 4. 构建镜像
+        run: docker build -t docker-cicd-demo:${{ github.sha }} .
+
+      - name: 5. 启动容器做冒烟测试
+        run: |
+          docker run -d --name demo -p 8000:8000 docker-cicd-demo:${{ github.sha }}
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8000/health; then
+              echo ""
+              echo "健康检查通过"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "健康检查失败，容器日志如下："
+          docker logs demo
+          exit 1
+
+      - name: 6. 清理容器
+        if: always()
+        run: docker rm -f demo || true
+
+      # ---------- CD 部分：只有 main 分支才推镜像 ----------
+      - name: 7. 生成小写镜像名
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: 8. 登录镜像仓库
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: 9. 打标签并推送
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          docker tag docker-cicd-demo:${{ github.sha }} "$IMAGE:latest"
+          docker tag docker-cicd-demo:${{ github.sha }} "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:latest"
+          docker push "$IMAGE:${{ github.sha }}"
+          echo "已推送：$IMAGE:latest"
